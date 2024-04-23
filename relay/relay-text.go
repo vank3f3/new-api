@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math"
 	"net/http"
 	"one-api/common"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo) (*dto.GeneralOpenAIRequest, error) {
@@ -62,6 +64,17 @@ func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo)
 	}
 	relayInfo.IsStream = textRequest.Stream
 	return textRequest, nil
+}
+
+// {"model":"deepseek-chat","messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Hello!"}]}
+type chatLog struct {
+	Model    string     `json:"model"`
+	Messages []Messages `json:"messages"`
+}
+
+type Messages struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
@@ -132,11 +145,15 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 	}
 	adaptor.Init(relayInfo, *textRequest)
 	var requestBody io.Reader
+	var chatLogs chatLog
 	if relayInfo.ApiType == relayconstant.APITypeOpenAI {
 		if isModelMapped {
 			jsonStr, err := json.Marshal(textRequest)
 			if err != nil {
 				return service.OpenAIErrorWrapper(err, "marshal_text_request_failed", http.StatusInternalServerError)
+			}
+			if err = json.Unmarshal(jsonStr, &chatLogs); err != nil {
+				return service.OpenAIErrorWrapper(err, "unmarshal_chat_logs_failed", http.StatusInternalServerError)
 			}
 			requestBody = bytes.NewBuffer(jsonStr)
 		} else {
@@ -151,6 +168,9 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 		if err != nil {
 			return service.OpenAIErrorWrapper(err, "json_marshal_failed", http.StatusInternalServerError)
 		}
+		if err = json.Unmarshal(jsonData, &chatLogs); err != nil {
+			return service.OpenAIErrorWrapper(err, "unmarshal_chat_logs_failed", http.StatusInternalServerError)
+		}
 		requestBody = bytes.NewBuffer(jsonData)
 	}
 
@@ -159,6 +179,24 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 	if err != nil {
 		return service.OpenAIErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
+
+	// 读取响应体
+	body, _ := ioutil.ReadAll(resp.Body)
+
+	// body: {"id":"d3ce0cad-1003-4511-af4a-813449ea1dde","choices":[{"index":0,"message":{"content":" Hello! How can I assist you today? If you have any questions or need information on a specific topic, feel free to ask.","role":"assistant"},"finish_reason":"stop","logprobs":null}],"created":1713786787,"model":"deepseek-chat","system_fingerprint":null,"object":"chat.completion","usage":{"prompt_tokens":17,"completion_tokens":27,"total_tokens":44}}
+	chatLogs.Messages = append(chatLogs.Messages, Messages{
+		Role:    gjson.Get(string(body), "choices").Get("0").Get("message").Get("content").String(),
+		Content: gjson.Get(string(body), "choices").Get("0").Get("message").Get("role").String(),
+	})
+	chatLogInfo, err := json.Marshal(chatLogs)
+	if err != nil {
+		return service.OpenAIErrorWrapper(err, "marshal_chat_logs_failed", http.StatusInternalServerError)
+	}
+	model.ChatLog(c, chatLogInfo)
+
+	// 由于body已经被读取，如果函数其他地方需要使用到body，你可能需要重新设置resp.Body
+	resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+
 	relayInfo.IsStream = relayInfo.IsStream || strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 
 	if resp.StatusCode != http.StatusOK {
@@ -176,6 +214,8 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
 		return openaiErr
 	}
+
+	// post-consume quota 后消耗配额
 	postConsumeQuota(c, relayInfo, *textRequest, usage, ratio, preConsumedQuota, userQuota, modelRatio, groupRatio, modelPrice)
 	return nil
 }

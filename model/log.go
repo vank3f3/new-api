@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"gorm.io/gorm"
+	llog "log"
 	"one-api/common"
+	"os"
 	"strings"
 )
 
@@ -55,6 +57,22 @@ func RecordLog(userId int, logType int, content string) {
 	if err != nil {
 		common.SysError("failed to record log: " + err.Error())
 	}
+}
+
+// ChatLog 对话日志
+func ChatLog(ctx context.Context, logInfo []byte) {
+	// 获取当前微秒时间戳
+	timestamp := common.GetTimestamp()
+	fileName := fmt.Sprintf("logs/chat/%d.log", timestamp)
+	file, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		common.LogError(ctx, fmt.Sprintf("open file failed: %s", err.Error()))
+	}
+	defer file.Close() // 确保在程序结束时关闭文件
+
+	// 创建一个新的日志记录器，输出到上面打开的文件
+	logger := llog.New(file, "", 0)
+	logger.Println(string(logInfo))
 }
 
 func RecordConsumeLog(ctx context.Context, userId int, channelId int, promptTokens int, completionTokens int, modelName string, tokenName string, quota int, content string, tokenId int, userQuota int, useTimeSeconds int, isStream bool) {
